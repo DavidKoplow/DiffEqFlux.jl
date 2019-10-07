@@ -1,8 +1,10 @@
 using Tracker: @grad
+using Zygote
 using DiffEqSensitivity: adjoint_sensitivities_u0
 
 ## Reverse-Mode via Flux.jl
 
+#TODO update
 function diffeq_rd(p,prob,args...;u0=prob.u0,kwargs...)
   if typeof(u0) <: AbstractArray && !(typeof(u0) <: TrackedArray)
     if DiffEqBase.isinplace(prob)
@@ -20,27 +22,25 @@ function diffeq_rd(p,prob,args...;u0=prob.u0,kwargs...)
 end
 
 ## Forward-Mode via ForwardDiff.jl
-
+#TODO update
 function diffeq_fd(p,f,n,prob,args...;u0=prob.u0,kwargs...)
   _prob = remake(prob,u0=convert.(eltype(p),u0),p=p)
   f(solve(_prob,args...;kwargs...))
 end
-
-diffeq_fd(p::TrackedVector,args...;kwargs...) = Tracker.track(diffeq_fd, p, args...; kwargs...)
-Tracker.@grad function diffeq_fd(p::TrackedVector,f,n,prob,args...;u0=prob.u0,kwargs...)
+#TODO update
+Zygote.@adjoint function diffeq_fd(p::AbstractVector,f,n,prob,args...;u0=prob.u0,kwargs...)
   _f = function (p)
     _prob = remake(prob,u0=convert.(eltype(p),u0),p=p)
     f(solve(_prob,args...;kwargs...))
   end
-  _p = Tracker.data(p)
   if n === nothing
-    result = DiffResults.GradientResult(_p)
-    ForwardDiff.gradient!(result, _f, _p)
+    result = DiffResults.GradientResult(p)
+    ForwardDiff.gradient!(result, _f, p)
     DiffResults.value(result),Δ -> (Δ .* DiffResults.gradient(result), ntuple(_->nothing, 3+length(args))...)
   else
-    y = adapt(typeof(_p),zeros(n))
-    result = DiffResults.JacobianResult(y,_p)
-    ForwardDiff.jacobian!(result, _f, _p)
+    y = adapt(typeof(p),zeros(n))
+    result = DiffResults.JacobianResult(y,p)
+    ForwardDiff.jacobian!(result, _f, p)
     DiffResults.value(result),Δ -> (DiffResults.jacobian(result)' * Δ, ntuple(_->nothing, 3+length(args))...)
   end
 end
@@ -48,22 +48,19 @@ end
 ## Reverse-Mode using Adjoint Sensitivity Analysis
 # Always reduces to Array
 
-function diffeq_adjoint(p,prob,args...;u0=prob.u0,kwargs...)
-  _prob = remake(prob,u0=u0,p=p)
+function diffeq_adjoint(prob,args...;u0=prob.u0,kwargs...)
+  _prob = remake(prob,u0=u0)
   T = gpu_or_cpu(u0)
-  adapt(T, solve(_prob,args...;kwargs...))
+ solve(_prob,args...;kwargs...)# adapt(T, )
 end
 
-diffeq_adjoint(p::TrackedVector,prob,args...;u0=prob.u0,kwargs...) =
-  Tracker.track(diffeq_adjoint, p, u0, prob, args...; kwargs...)
-
-@grad function diffeq_adjoint(p,u0,prob,args...;backsolve=true,
+ Zygote.@adjoint function diffeq_adjoint(u0,prob,args...;backsolve=true,
                               save_start=true,save_end=true,
                               sensealg=SensitivityAlg(quad=false,backsolve=backsolve),
                               kwargs...)
 
   T = gpu_or_cpu(u0)
-  _prob = remake(prob,u0=Tracker.data(u0),p=Tracker.data(p))
+  _prob = remake(prob,u0=u0)
 
   # Force `save_start` and `save_end` in the forward pass This forces the
   # solver to do the backsolve all the way back to `u0` Since the start aliases
@@ -82,7 +79,6 @@ diffeq_adjoint(p::TrackedVector,prob,args...;u0=prob.u0,kwargs...) =
   only_end && (sol_idxs = 1)
   out = only_end ? sol[end] : reduce((x,y)->cat(x,y,dims=ndims(u)),u.u)
   out, Δ -> begin
-    Δ = Tracker.data(Δ)
     function df(out, u, p, t, i)
       if only_end
         out[:] .= -vec(Δ)
@@ -90,7 +86,6 @@ diffeq_adjoint(p::TrackedVector,prob,args...;u0=prob.u0,kwargs...) =
         out[:] .= -reshape(Δ, :, size(Δ)[end])[:, i]
       end
     end
-
     ts = sol.t[sol_idxs]
     du0, dp = adjoint_sensitivities_u0(sol,args...,df,ts;
                     sensealg=sensealg,
@@ -98,3 +93,4 @@ diffeq_adjoint(p::TrackedVector,prob,args...;u0=prob.u0,kwargs...) =
     (dp', reshape(du0,size(u0)), ntuple(_->nothing, 1+length(args))...)
   end
 end
+
